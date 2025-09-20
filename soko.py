@@ -16,7 +16,7 @@ Walls
 - De-fisheye: multiply raw t by cos(column-offset) (OFF_COS) before projecting.
 - Height: screen-space wall slice ∝ 1/depth, scaled by WALL_HEIGHT_SCALE so you
   can see over boxes.
-- Optional distance shading per column (shade_factor) applied to WALL_COLOR.
+- Optional distance shading per column applied to WALL_COLOR (no Lambert for walls).
 
 Boxes (true cubes)
 - Each box is a 3D prism (width BOX_WIDTH, height BOX_HEIGHT) rendered as 5 quads
@@ -45,8 +45,8 @@ Goal pads (floor decals)
 
 Shading
 - Distance falloff: f = 1/(1 + SHADE_FALLOFF·depth), clamped to SHADE_MIN.
-- Walls always consider distance shading when enabled; boxes can be gated via
-  SPRITE_DISTANCE_SHADING. Lambert factor mixes into base colors.
+- Walls always use distance shading when enabled. For boxes, SPRITE_DISTANCE_SHADING
+  gates both distance and Lambert shading.
 
 Camera & projection
 - Player-relative camera space: Xc=right, Yc=up, Zc=forward. Perspective:
@@ -338,23 +338,21 @@ OFF_COS = [math.cos(a) for a in ANGLE_OFFSETS]  # de-fisheye
 OFF_SIN = [math.sin(a) for a in ANGLE_OFFSETS]  # rotate rays
 
 
-# ===================== SHADING =====================
-def shade_factor(depth):
-    f = 1.0 / (1.0 + SHADE_FALLOFF * depth)
-    return max(SHADE_MIN, min(1.0, f))
-
-
-def shade_color(color, factor):
+# ===================== SHADING (unified) =====================
+def shade(color, depth, normal=None, *, apply_distance=True):
+    # distance falloff
+    f = 1.0
+    if ENABLE_DISTANCE_SHADING and apply_distance:
+        f = 1.0 / (1.0 + SHADE_FALLOFF * depth)
+        f = max(SHADE_MIN, min(1.0, f))
+    # lambert (optional)
+    if normal is not None:
+        nx, ny, nz = normal
+        lx, ly, lz = LIGHT_DIR
+        lambert = max(0.0, nx * lx + ny * ly + nz * lz)
+        f *= (0.35 + 0.65 * lambert)
     r, g, b = color
-    factor = max(0.0, min(1.0, factor))
-    return (int(r * factor), int(g * factor), int(b * factor))
-
-
-def lambert_factor(normal_world):
-    nx, ny, nz = normal_world
-    lx, ly, lz = LIGHT_DIR
-    dot = max(0.0, nx * lx + ny * ly + nz * lz)
-    return 0.35 + 0.65 * dot
+    return (int(r * f), int(g * f), int(b * f))
 
 
 # ===================== CAMERA/PROJECTION =====================
@@ -500,10 +498,14 @@ def draw_face_world_poly(world_pts, normal_world, base_color, z_buffer, box_span
         return
 
     avg_depth = sum(p[2] for p in proj) / len(proj)
-    brightness = lambert_factor(normal_world)
-    if ENABLE_DISTANCE_SHADING and SPRITE_DISTANCE_SHADING:
-        brightness *= shade_factor(avg_depth)
-    color = shade_color(base_color, brightness)
+
+    # Unified shading (Lambert and distance both gated by SPRITE_DISTANCE_SHADING)
+    color = shade(
+        base_color,
+        avg_depth,
+        normal_world if SPRITE_DISTANCE_SHADING else None,
+        apply_distance=SPRITE_DISTANCE_SHADING
+    )
 
     for colx in range(left, right + 1):
         hits = _edge_intersections_for_x_poly(colx + 0.5, proj)
@@ -552,7 +554,6 @@ def draw_cube(cx, cy, base_color, z_buffer, box_spans, on_goal=False):
     for quad, normal, bias in faces:
         draw_face_world_poly(quad, normal, col, z_buffer,
                              box_spans, face_bias=bias)
-
 
 # ---------- Pads (floor decals) ----------
 def _edge_intersections_for_x(x, pts):
@@ -690,8 +691,8 @@ def draw_scene():
         if hit_type == "#":
             proj = int((SCREEN_HEIGHT * WALL_HEIGHT_SCALE) / depth)
             top, bottom = half - proj // 2, half + proj // 2
-            color = shade_color(WALL_COLOR, shade_factor(
-                depth)) if ENABLE_DISTANCE_SHADING else WALL_COLOR
+            # Intentionally no Lambert for walls (no surface normal); distance-only shading
+            color = shade(WALL_COLOR, depth, apply_distance=True)
             pygame.draw.line(screen, color, (col, top), (col, bottom))
             z_buffer[col] = depth
 
